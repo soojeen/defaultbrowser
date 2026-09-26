@@ -2,7 +2,6 @@ BIN ?= defaultbrowser
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 
-CC ?= gcc
 CFLAGS ?= -O2
 
 .PHONY: all install uninstall clean
