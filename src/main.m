@@ -5,6 +5,7 @@
 
 #import <Foundation/Foundation.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import <AppKit/AppKit.h>
 
 NSString* app_name_from_bundle_id(NSString *app_bundle_id) {
     return [[[app_bundle_id componentsSeparatedByString:@"."] lastObject] lowercaseString];
@@ -35,11 +36,41 @@ NSString* get_current_http_handler() {
     return app_name_from_bundle_id(handler);
 }
 
-void set_default_handler(NSString *url_scheme, NSString *handler) {
-    LSSetDefaultHandlerForURLScheme(
-        (__bridge CFStringRef) url_scheme,
-        (__bridge CFStringRef) handler
-    );
+// Blocks until the user answers the consent dialog (if any).
+BOOL set_default_handler(NSString *url_scheme, NSString *handler) {
+    NSURL *app_url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:handler];
+    __block BOOL done = NO;
+    __block BOOL ok = NO;
+
+    // Report the error inside the handler: without ARC, the NSError isn't
+    // retained past the handler's return.
+    [[NSWorkspace sharedWorkspace] setDefaultApplicationAtURL:app_url
+                                         toOpenURLsWithScheme:url_scheme
+                                            completionHandler:^(NSError *error) {
+        NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
+
+        if (underlying != nil &&
+            [underlying.domain isEqualToString:NSOSStatusErrorDomain] &&
+            underlying.code == userCanceledErr) {
+            fprintf(stderr, "Change declined; default browser not changed\n");
+        } else if (error != nil) {
+            fprintf(stderr, "Could not set %s handler: %s\n", [url_scheme UTF8String], [[error localizedDescription] UTF8String]);
+        }
+        ok = (error == nil);
+        done = YES;
+    }];
+
+    while (!done) {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    }
+
+    return ok;
+}
+
+BOOL is_default_handler(NSString *url_scheme, NSString *handler) {
+    NSString *current = CFBridgingRelease(LSCopyDefaultHandlerForURLScheme((__bridge CFStringRef) url_scheme));
+
+    return current != nil && [current caseInsensitiveCompare:handler] == NSOrderedSame;
 }
 
 int main(int argc, const char *argv[]) {
@@ -67,9 +98,16 @@ int main(int argc, const char *argv[]) {
                 NSString *target_handler = handlers[target_handler_name];
 
                 if (target_handler != nil) {
-                    // Set new HTTP handler (HTTP and HTTPS separately)
-                    set_default_handler(@"http", target_handler);
-                    set_default_handler(@"https", target_handler);
+                    // Set HTTP first and wait for consent. Approving the browser change
+                    // usually updates HTTPS too, so only ask again if it didn't.
+                    if (!set_default_handler(@"http", target_handler)) {
+                        return 1;
+                    }
+
+                    if (!is_default_handler(@"https", target_handler) &&
+                        !set_default_handler(@"https", target_handler)) {
+                        return 1;
+                    }
                 } else {
                     printf("%s is not available as an HTTP handler\n", target);
 
