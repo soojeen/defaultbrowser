@@ -11,11 +11,12 @@ NSString* app_name_from_bundle_id(NSString *app_bundle_id) {
     return [[[app_bundle_id componentsSeparatedByString:@"."] lastObject] lowercaseString];
 }
 
+NSString* default_handler(NSString *url_scheme) {
+    return CFBridgingRelease(LSCopyDefaultHandlerForURLScheme((__bridge CFStringRef) url_scheme));
+}
+
 NSMutableDictionary* get_http_handlers() {
-    NSArray *handlers =
-      (__bridge NSArray *) LSCopyAllHandlersForURLScheme(
-        (__bridge CFStringRef) @"http"
-      );
+    NSArray *handlers = CFBridgingRelease(LSCopyAllHandlersForURLScheme((__bridge CFStringRef) @"http"));
 
     NSMutableDictionary *dict = [NSMutableDictionary dictionary];
 
@@ -28,49 +29,65 @@ NSMutableDictionary* get_http_handlers() {
 }
 
 NSString* get_current_http_handler() {
-    NSString *handler =
-        (__bridge NSString *) LSCopyDefaultHandlerForURLScheme(
-            (__bridge CFStringRef) @"http"
-        );
+    return app_name_from_bundle_id(default_handler(@"http"));
+}
 
-    return app_name_from_bundle_id(handler);
+BOOL is_default_handler(NSString *url_scheme, NSString *handler) {
+    NSString *current = default_handler(url_scheme);
+
+    return current != nil && [current caseInsensitiveCompare:handler] == NSOrderedSame;
 }
 
 // Blocks until the user answers the consent dialog (if any).
 BOOL set_default_handler(NSString *url_scheme, NSString *handler) {
-    NSURL *app_url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:handler];
-    __block BOOL done = NO;
-    __block BOOL ok = NO;
+    if (@available(macOS 12.0, *)) {
+        NSURL *app_url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:handler];
 
-    // Report the error inside the handler: without ARC, the NSError isn't
-    // retained past the handler's return.
-    [[NSWorkspace sharedWorkspace] setDefaultApplicationAtURL:app_url
-                                         toOpenURLsWithScheme:url_scheme
-                                            completionHandler:^(NSError *error) {
-        NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
-
-        if (underlying != nil &&
-            [underlying.domain isEqualToString:NSOSStatusErrorDomain] &&
-            underlying.code == userCanceledErr) {
-            fprintf(stderr, "Change declined; default browser not changed\n");
-        } else if (error != nil) {
-            fprintf(stderr, "Could not set %s handler: %s\n", [url_scheme UTF8String], [[error localizedDescription] UTF8String]);
+        if (app_url == nil) {
+            fprintf(stderr, "%s is not installed\n", [handler UTF8String]);
+            return NO;
         }
-        ok = (error == nil);
-        done = YES;
-    }];
 
-    while (!done) {
-        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        __block BOOL ok = NO;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+        // Report the error inside the handler: without ARC, the NSError isn't
+        // retained past the handler's return. The handler runs off the main
+        // thread, so blocking on the semaphore can't deadlock.
+        [[NSWorkspace sharedWorkspace] setDefaultApplicationAtURL:app_url
+                                             toOpenURLsWithScheme:url_scheme
+                                                completionHandler:^(NSError *error) {
+            NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
+            BOOL declined =
+                ([error.domain isEqualToString:NSCocoaErrorDomain] && error.code == NSUserCancelledError) ||
+                ([underlying.domain isEqualToString:NSOSStatusErrorDomain] && underlying.code == userCanceledErr);
+
+            if (declined) {
+                fprintf(stderr, "Change declined; default browser not changed\n");
+            } else if (error != nil) {
+                fprintf(stderr, "Could not set %s handler: %s\n", [url_scheme UTF8String], [[error localizedDescription] UTF8String]);
+            }
+
+            ok = (error == nil);
+            dispatch_semaphore_signal(sem);
+        }];
+
+        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        dispatch_release(sem);
+
+        return ok;
+    } else {
+        OSStatus status = LSSetDefaultHandlerForURLScheme(
+            (__bridge CFStringRef) url_scheme,
+            (__bridge CFStringRef) handler
+        );
+
+        if (status != noErr) {
+            fprintf(stderr, "Could not set %s handler (error %d)\n", [url_scheme UTF8String], (int) status);
+        }
+
+        return status == noErr;
     }
-
-    return ok;
-}
-
-BOOL is_default_handler(NSString *url_scheme, NSString *handler) {
-    NSString *current = CFBridgingRelease(LSCopyDefaultHandlerForURLScheme((__bridge CFStringRef) url_scheme));
-
-    return current != nil && [current caseInsensitiveCompare:handler] == NSOrderedSame;
 }
 
 int main(int argc, const char *argv[]) {
@@ -91,28 +108,32 @@ int main(int argc, const char *argv[]) {
             }
         } else {
             NSString *target_handler_name = [NSString stringWithUTF8String:target];
+            NSString *target_handler = handlers[target_handler_name];
 
-            if ([target_handler_name caseInsensitiveCompare:current_handler_name] == NSOrderedSame) {
-              printf("%s is already set as the default HTTP handler\n", target);
-            } else {
-                NSString *target_handler = handlers[target_handler_name];
+            if (target_handler == nil) {
+                printf("%s is not available as an HTTP handler\n", target);
 
-                if (target_handler != nil) {
-                    // Set HTTP first and wait for consent. Approving the browser change
-                    // usually updates HTTPS too, so only ask again if it didn't.
-                    if (!set_default_handler(@"http", target_handler)) {
-                        return 1;
-                    }
+                return 1;
+            }
 
-                    if (!is_default_handler(@"https", target_handler) &&
-                        !set_default_handler(@"https", target_handler)) {
-                        return 1;
-                    }
-                } else {
-                    printf("%s is not available as an HTTP handler\n", target);
+            // Set HTTP first and wait for consent. Approving the browser change
+            // usually updates HTTPS too, so only ask again if it didn't.
+            BOOL changed = NO;
 
+            for (NSString *scheme in @[@"http", @"https"]) {
+                if (is_default_handler(scheme, target_handler)) {
+                    continue;
+                }
+
+                if (!set_default_handler(scheme, target_handler)) {
                     return 1;
                 }
+
+                changed = YES;
+            }
+
+            if (!changed) {
+                printf("%s is already set as the default HTTP handler\n", target);
             }
         }
     }
