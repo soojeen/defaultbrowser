@@ -11,18 +11,27 @@ NSString* app_name_from_bundle_id(NSString *app_bundle_id) {
     return [[[app_bundle_id componentsSeparatedByString:@"."] lastObject] lowercaseString];
 }
 
+NSURL* scheme_url(NSString *url_scheme) {
+    return [NSURL URLWithString:[url_scheme stringByAppendingString:@"://"]];
+}
+
 NSString* default_handler(NSString *url_scheme) {
-    return CFBridgingRelease(LSCopyDefaultHandlerForURLScheme((__bridge CFStringRef) url_scheme));
+    NSURL *app_url = [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:scheme_url(url_scheme)];
+
+    return app_url ? [[NSBundle bundleWithURL:app_url] bundleIdentifier] : nil;
 }
 
 NSMutableDictionary* get_http_handlers() {
-    NSArray *handlers = CFBridgingRelease(LSCopyAllHandlersForURLScheme((__bridge CFStringRef) @"http"));
+    NSArray *app_urls = [[NSWorkspace sharedWorkspace] URLsForApplicationsToOpenURL:scheme_url(@"http")];
 
     NSMutableDictionary *dict = [NSMutableDictionary dictionary];
 
-    for (int i = 0; i < [handlers count]; i++) {
-        NSString *handler = [handlers objectAtIndex:i];
-        dict[app_name_from_bundle_id(handler)] = handler;
+    for (NSURL *app_url in app_urls) {
+        NSString *handler = [[NSBundle bundleWithURL:app_url] bundleIdentifier];
+
+        if (handler != nil) {
+            dict[app_name_from_bundle_id(handler)] = handler;
+        }
     }
 
     return dict;
@@ -78,7 +87,7 @@ BOOL set_default_handler(NSString *url_scheme, NSString *handler) {
 }
 
 int main(int argc, const char *argv[]) {
-    const char *target = (argc == 1) ? '\0' : argv[1];
+    const char *target = (argc == 1) ? NULL : argv[1];
 
     @autoreleasepool {
         // Get all HTTP handlers
@@ -87,7 +96,7 @@ int main(int argc, const char *argv[]) {
         // Get current HTTP handler
         NSString *current_handler_name = get_current_http_handler();
 
-        if (target == '\0') {
+        if (target == NULL) {
             // List all HTTP handlers, marking the current one with a star
             for (NSString *key in handlers) {
                 char *mark = [key caseInsensitiveCompare:current_handler_name] == NSOrderedSame ? "* " : "  ";
