@@ -40,54 +40,41 @@ BOOL is_default_handler(NSString *url_scheme, NSString *handler) {
 
 // Blocks until the user answers the consent dialog (if any).
 BOOL set_default_handler(NSString *url_scheme, NSString *handler) {
-    if (@available(macOS 12.0, *)) {
-        NSURL *app_url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:handler];
+    NSURL *app_url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:handler];
 
-        if (app_url == nil) {
-            fprintf(stderr, "%s is not installed\n", [handler UTF8String]);
-            return NO;
-        }
-
-        __block BOOL ok = NO;
-        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-
-        // Report the error inside the handler: without ARC, the NSError isn't
-        // retained past the handler's return. The handler runs off the main
-        // thread, so blocking on the semaphore can't deadlock.
-        [[NSWorkspace sharedWorkspace] setDefaultApplicationAtURL:app_url
-                                             toOpenURLsWithScheme:url_scheme
-                                                completionHandler:^(NSError *error) {
-            NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
-            BOOL declined =
-                ([error.domain isEqualToString:NSCocoaErrorDomain] && error.code == NSUserCancelledError) ||
-                ([underlying.domain isEqualToString:NSOSStatusErrorDomain] && underlying.code == userCanceledErr);
-
-            if (declined) {
-                fprintf(stderr, "Change declined; default browser not changed\n");
-            } else if (error != nil) {
-                fprintf(stderr, "Could not set %s handler: %s\n", [url_scheme UTF8String], [[error localizedDescription] UTF8String]);
-            }
-
-            ok = (error == nil);
-            dispatch_semaphore_signal(sem);
-        }];
-
-        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-        dispatch_release(sem);
-
-        return ok;
-    } else {
-        OSStatus status = LSSetDefaultHandlerForURLScheme(
-            (__bridge CFStringRef) url_scheme,
-            (__bridge CFStringRef) handler
-        );
-
-        if (status != noErr) {
-            fprintf(stderr, "Could not set %s handler (error %d)\n", [url_scheme UTF8String], (int) status);
-        }
-
-        return status == noErr;
+    if (app_url == nil) {
+        fprintf(stderr, "%s is not installed\n", [handler UTF8String]);
+        return NO;
     }
+
+    __block BOOL ok = NO;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    // Report the error inside the handler: without ARC, the NSError isn't
+    // retained past the handler's return. The handler runs off the main
+    // thread, so blocking on the semaphore can't deadlock.
+    [[NSWorkspace sharedWorkspace] setDefaultApplicationAtURL:app_url
+                                         toOpenURLsWithScheme:url_scheme
+                                            completionHandler:^(NSError *error) {
+        NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
+        BOOL declined =
+            ([error.domain isEqualToString:NSCocoaErrorDomain] && error.code == NSUserCancelledError) ||
+            ([underlying.domain isEqualToString:NSOSStatusErrorDomain] && underlying.code == userCanceledErr);
+
+        if (declined) {
+            fprintf(stderr, "Change declined; default browser not changed\n");
+        } else if (error != nil) {
+            fprintf(stderr, "Could not set %s handler: %s\n", [url_scheme UTF8String], [[error localizedDescription] UTF8String]);
+        }
+
+        ok = (error == nil);
+        dispatch_semaphore_signal(sem);
+    }];
+
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    dispatch_release(sem);
+
+    return ok;
 }
 
 int main(int argc, const char *argv[]) {
