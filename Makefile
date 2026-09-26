@@ -9,8 +9,8 @@ CFLAGS ?= -O2
 
 all: $(BIN)
 
-$(BIN):
-	$(CC) -o $(BIN) $(CFLAGS) -framework Foundation -framework ApplicationServices src/main.m
+$(BIN): src/main.m
+	$(CC) -o $(BIN) $(CFLAGS) -mmacosx-version-min=12.0 -framework Foundation -framework ApplicationServices -framework AppKit src/main.m
 
 install: $(BIN)
 	install -d $(DESTDIR)$(BINDIR)
